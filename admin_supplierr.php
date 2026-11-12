@@ -14,7 +14,7 @@ date_default_timezone_set('Asia/Jakarta');
 // ==========================================
 // 1. KONEKSI DATABASE & KONFIGURASI
 // ==========================================
-require_once '../../config/database.php'; // Sesuaikan path database
+require_once __DIR__ . '/database.php';
 
 $pesan_sukses = '';
 $pesan_error = '';
