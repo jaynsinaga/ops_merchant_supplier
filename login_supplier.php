@@ -4,7 +4,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 date_default_timezone_set('Asia/Jakarta');
-require_once '../../config/database.php';
+require_once __DIR__ . '/database.php';
 
 // Konfigurasi Target POS & Geofencing Radius 500 Meter
 define('POS_LAT', -7.753053);
