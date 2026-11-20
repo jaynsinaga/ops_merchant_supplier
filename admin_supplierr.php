@@ -100,17 +100,34 @@ if ($is_logged_in) {
     }
 
     // ==========================================
-    // 4. FITUR EXPORT EXCEL (TAB 2 LOG KIOS)
+    // 4. FITUR EXPORT EXCEL (TAB 2 LOG KIOS - 1 BARIS PER KEDATANGAN)
     // ==========================================
     if (isset($_GET['export']) && $_GET['export'] === 'excel') {
-        $log_bulan = $_GET['log_bulan'] ?? '';
-        $log_tahun = $_GET['log_tahun'] ?? '';
+        $log_bulan  = $_GET['log_bulan'] ?? '';
+        $log_tahun  = $_GET['log_tahun'] ?? '';
+        $log_search = trim($_GET['log_search'] ?? '');
 
-        $sql_export = "SELECT l.jumlah, l.waktu_masuk, 
-                              m.nama_supplier, m.jenis_barang, 
-                              kb.nama_kategori, sb.nama_satuan
+        $sql_export = "SELECT l.waktu_masuk, 
+                              m.nama_supplier, 
+                              kb.nama_kategori,
+                              GROUP_CONCAT(
+                                  NULLIF(TRIM(msb.nama_barang), '') 
+                                  ORDER BY l.{$log_pk_col} ASC SEPARATOR ', '
+                              ) AS daftar_jenis_barang,
+                              GROUP_CONCAT(
+                                  CASE 
+                                      WHEN l.jumlah > 0 THEN CONCAT(
+                                          COALESCE(msb.nama_barang, 'Barang'), ' (', l.jumlah, 
+                                          IF(sb.nama_satuan IS NOT NULL AND sb.nama_satuan != '', CONCAT(' ', sb.nama_satuan), ''), 
+                                          ')'
+                                      )
+                                      ELSE NULL 
+                                  END
+                                  ORDER BY l.{$log_pk_col} ASC SEPARATOR ', '
+                              ) AS rincian_bawaan
                        FROM merchant_log_akses_supplier l 
                        LEFT JOIN merchant_supplier m ON l.supplier_id = m.supplier_id 
+                       LEFT JOIN merchant_supplier_barang msb ON l.barang_id = msb.barang_id
                        LEFT JOIN merchant_kategori_barang kb ON m.kategori_id = kb.kategori_id
                        LEFT JOIN merchant_satuan_barang sb ON l.satuan_id = sb.satuan_id
                        WHERE 1=1";
@@ -124,7 +141,12 @@ if ($is_logged_in) {
             $sql_export .= " AND YEAR(l.waktu_masuk) = ?";
             $params_export[] = $log_tahun;
         }
-        $sql_export .= " ORDER BY l.waktu_masuk DESC";
+        if (!empty($log_search)) {
+            $sql_export .= " AND (m.nama_supplier LIKE ? OR msb.nama_barang LIKE ? OR kb.nama_kategori LIKE ?)";
+            $term = "%" . $log_search . "%";
+            array_push($params_export, $term, $term, $term);
+        }
+        $sql_export .= " GROUP BY l.supplier_id, l.waktu_masuk ORDER BY l.waktu_masuk DESC";
 
         $stmt_ex = $pdo->prepare($sql_export);
         $stmt_ex->execute($params_export);
@@ -138,26 +160,20 @@ if ($is_logged_in) {
                 <th style="background-color: #1F4E78; color: white;">No</th>
                 <th style="background-color: #1F4E78; color: white;">Waktu Kedatangan</th>
                 <th style="background-color: #1F4E78; color: white;">Nama Supplier</th>
-                <th style="background-color: #1F4E78; color: white;">Jenis Barang</th>
                 <th style="background-color: #1F4E78; color: white;">Kategori Barang</th>
-                <th style="background-color: #1F4E78; color: white;">Jumlah</th>
-                <th style="background-color: #1F4E78; color: white;">Satuan</th>
-                <th style="background-color: #1F4E78; color: white;">Keterangan</th>
+                <th style="background-color: #1F4E78; color: white;">Jenis Barang</th>
+                <th style="background-color: #1F4E78; color: white;">Rincian Jumlah Bawaan</th>
             </tr>
             <?php
             $no = 1;
             foreach ($data_export as $row) {
-                $jml_tampil = ($row['jumlah'] > 0) ? $row['jumlah'] : '-';
-                $sat_tampil = ($row['jumlah'] > 0 && !empty($row['nama_satuan'])) ? $row['nama_satuan'] : '-';
                 echo "<tr>";
                 echo "<td>" . $no++ . "</td>";
                 echo "<td>" . date('d-m-Y H:i:s', strtotime($row['waktu_masuk'])) . "</td>";
                 echo "<td>" . htmlspecialchars($row['nama_supplier'] ?? 'Telah Dihapus') . "</td>";
-                echo "<td>" . htmlspecialchars($row['jenis_barang'] ?? '-') . "</td>";
                 echo "<td>" . htmlspecialchars($row['nama_kategori'] ?? '-') . "</td>";
-                echo "<td>" . $jml_tampil . "</td>";
-                echo "<td>" . htmlspecialchars($sat_tampil) . "</td>";
-
+                echo "<td>" . htmlspecialchars(!empty($row['daftar_jenis_barang']) ? $row['daftar_jenis_barang'] : '-') . "</td>";
+                echo "<td>" . htmlspecialchars(!empty($row['rincian_bawaan']) ? $row['rincian_bawaan'] : '-') . "</td>";
                 echo "</tr>";
             }
             ?>
@@ -198,42 +214,108 @@ if ($is_logged_in) {
             } else {
                 // --- CRUD SUPPLIER ---
                 if ($action === 'tambah') {
-                    $nama         = trim($_POST['nama_supplier'] ?? '');
+                    $nama         = trim(preg_replace('/\s+/', ' ', $_POST['nama_supplier'] ?? ''));
                     $alamat       = trim($_POST['alamat'] ?? '');
                     $no_hp        = trim($_POST['no_hp'] ?? '');
                     $jenis_barang = trim($_POST['jenis_barang'] ?? '');
                     $kategori_id  = !empty($_POST['kategori_id']) ? intval($_POST['kategori_id']) : null;
-                    $password_def = md5('12345');
+                    // Password default: nama supplier tanpa spasi
+                    $password_def = str_replace(' ', '', $nama);
 
-                    if (!empty($nama) && !empty($jenis_barang)) {
+                    if (!empty($nama)) {
                         try {
-                            $stmt = $pdo->prepare("INSERT INTO merchant_supplier (nama_supplier, alamat, no_hp, jenis_barang, kategori_id, password) VALUES (?, ?, ?, ?, ?, ?)");
-                            $stmt->execute([$nama, $alamat, $no_hp, $jenis_barang, $kategori_id, $password_def]);
-                            $pesan_sukses = "Data supplier baru berhasil ditambahkan!";
+                            // Cek duplikasi nama supplier (case-insensitive & abaikan spasi berlebih)
+                            $stmtCekNama = $pdo->prepare("SELECT COUNT(*) FROM merchant_supplier WHERE LOWER(TRIM(nama_supplier)) = LOWER(?)");
+                            $stmtCekNama->execute([$nama]);
+
+                            if ($stmtCekNama->fetchColumn() > 0) {
+                                $pesan_error = "Gagal menambah: Nama supplier '{$nama}' sudah terdaftar di sistem!";
+                            } else {
+                                $pdo->beginTransaction();
+
+                                $stmt = $pdo->prepare("INSERT INTO merchant_supplier (nama_supplier, alamat, no_hp, kategori_id, password) VALUES (?, ?, ?, ?, ?)");
+                                $stmt->execute([$nama, $alamat, $no_hp, $kategori_id, $password_def]);
+                                $new_supplier_id = $pdo->lastInsertId();
+
+                                // Simpan daftar barang ke merchant_supplier_barang (dipisahkan koma jika lebih dari 1)
+                                if (!empty($jenis_barang)) {
+                                    $items = array_filter(array_map('trim', explode(',', $jenis_barang)));
+                                    $stmtBrg = $pdo->prepare("INSERT INTO merchant_supplier_barang (supplier_id, nama_barang) VALUES (?, ?)");
+                                    foreach ($items as $item) {
+                                        $stmtBrg->execute([$new_supplier_id, $item]);
+                                    }
+                                }
+
+                                $pdo->commit();
+                                $pesan_sukses = "Data supplier baru berhasil ditambahkan! (Password default: {$password_def})";
+                            }
                         } catch (Exception $e) {
+                            if ($pdo->inTransaction()) $pdo->rollBack();
                             $pesan_error = "Gagal menambah supplier: " . $e->getMessage();
                         }
                     } else {
-                        $pesan_error = "Nama Supplier dan Jenis Barang wajib diisi!";
+                        $pesan_error = "Nama Supplier wajib diisi!";
                     }
                 } elseif ($action === 'edit') {
                     $supplier_id  = intval($_POST['supplier_id'] ?? 0);
-                    $nama         = trim($_POST['nama_supplier'] ?? '');
+                    $nama         = trim(preg_replace('/\s+/', ' ', $_POST['nama_supplier'] ?? ''));
                     $alamat       = trim($_POST['alamat'] ?? '');
                     $no_hp        = trim($_POST['no_hp'] ?? '');
                     $jenis_barang = trim($_POST['jenis_barang'] ?? '');
                     $kategori_id  = !empty($_POST['kategori_id']) ? intval($_POST['kategori_id']) : null;
 
-                    if ($supplier_id > 0 && !empty($nama) && !empty($jenis_barang)) {
+                    if ($supplier_id > 0 && !empty($nama)) {
                         try {
-                            $stmt = $pdo->prepare("UPDATE merchant_supplier SET nama_supplier = ?, alamat = ?, no_hp = ?, jenis_barang = ?, kategori_id = ? WHERE supplier_id = ?");
-                            $stmt->execute([$nama, $alamat, $no_hp, $jenis_barang, $kategori_id, $supplier_id]);
-                            $pesan_sukses = "Data supplier berhasil diperbarui!";
+                            // Cek duplikasi nama supplier milik supplier lain (case-insensitive)
+                            $stmtCekNama = $pdo->prepare("SELECT COUNT(*) FROM merchant_supplier WHERE LOWER(TRIM(nama_supplier)) = LOWER(?) AND supplier_id != ?");
+                            $stmtCekNama->execute([$nama, $supplier_id]);
+
+                            if ($stmtCekNama->fetchColumn() > 0) {
+                                $pesan_error = "Gagal memperbarui: Nama supplier '{$nama}' sudah digunakan oleh supplier lain!";
+                            } else {
+                                $pdo->beginTransaction();
+
+                                $stmt = $pdo->prepare("UPDATE merchant_supplier SET nama_supplier = ?, alamat = ?, no_hp = ?, kategori_id = ? WHERE supplier_id = ?");
+                                $stmt->execute([$nama, $alamat, $no_hp, $kategori_id, $supplier_id]);
+
+                                // Sinkronkan daftar barang di merchant_supplier_barang
+                                $new_items = array_filter(array_map('trim', explode(',', $jenis_barang)));
+                                $stmtExisting = $pdo->prepare("SELECT barang_id, nama_barang FROM merchant_supplier_barang WHERE supplier_id = ?");
+                                $stmtExisting->execute([$supplier_id]);
+                                $existing_rows = $stmtExisting->fetchAll(PDO::FETCH_ASSOC);
+
+                                $existing_lower = [];
+                                foreach ($existing_rows as $er) {
+                                    $existing_lower[strtolower($er['nama_barang'])] = $er['barang_id'];
+                                }
+
+                                $new_lower = array_map('strtolower', $new_items);
+
+                                // Hapus barang yang dihapus dari input
+                                $stmtDelBrg = $pdo->prepare("DELETE FROM merchant_supplier_barang WHERE barang_id = ?");
+                                foreach ($existing_rows as $er) {
+                                    if (!in_array(strtolower($er['nama_barang']), $new_lower)) {
+                                        $stmtDelBrg->execute([$er['barang_id']]);
+                                    }
+                                }
+
+                                // Tambah barang baru yang belum ada
+                                $stmtInsBrg = $pdo->prepare("INSERT INTO merchant_supplier_barang (supplier_id, nama_barang) VALUES (?, ?)");
+                                foreach ($new_items as $ni) {
+                                    if (!isset($existing_lower[strtolower($ni)])) {
+                                        $stmtInsBrg->execute([$supplier_id, $ni]);
+                                    }
+                                }
+
+                                $pdo->commit();
+                                $pesan_sukses = "Data supplier berhasil diperbarui!";
+                            }
                         } catch (Exception $e) {
+                            if ($pdo->inTransaction()) $pdo->rollBack();
                             $pesan_error = "Gagal memperbarui supplier: " . $e->getMessage();
                         }
                     } else {
-                        $pesan_error = "Data tidak valid. Nama dan Jenis Barang wajib diisi!";
+                        $pesan_error = "Data tidak valid. Nama Supplier wajib diisi!";
                     }
                 } elseif ($action === 'edit_password') {
                     $supplier_id   = intval($_POST['supplier_id'] ?? 0);
@@ -241,9 +323,8 @@ if ($is_logged_in) {
 
                     if ($supplier_id > 0 && !empty($password_baru)) {
                         try {
-                            $password_hash = md5($password_baru);
                             $stmt = $pdo->prepare("UPDATE merchant_supplier SET password = ? WHERE supplier_id = ?");
-                            $stmt->execute([$password_hash, $supplier_id]);
+                            $stmt->execute([$password_baru, $supplier_id]);
                             $pesan_sukses = "Password supplier berhasil diperbarui!";
                         } catch (Exception $e) {
                             $pesan_error = "Gagal memperbarui password: " . $e->getMessage();
@@ -263,11 +344,15 @@ if ($is_logged_in) {
                         }
                     }
                 } elseif ($action === 'hapus_log') {
-                    $log_id = intval($_POST['log_id'] ?? 0);
-                    if ($log_id > 0) {
+                    // Hapus semua record log pada sesi kedatangan tersebut (1 baris = bisa terdiri dari beberapa ID log)
+                    $raw_ids = trim($_POST['log_ids'] ?? '');
+                    $id_list = array_filter(array_map('intval', explode(',', $raw_ids)));
+
+                    if (!empty($id_list)) {
                         try {
-                            $stmt = $pdo->prepare("DELETE FROM merchant_log_akses_supplier WHERE {$log_pk_col} = ?");
-                            $stmt->execute([$log_id]);
+                            $placeholders = implode(',', array_fill(0, count($id_list), '?'));
+                            $stmt = $pdo->prepare("DELETE FROM merchant_log_akses_supplier WHERE {$log_pk_col} IN ({$placeholders})");
+                            $stmt->execute($id_list);
                             $pesan_sukses = "Data log kedatangan berhasil dihapus!";
                         } catch (Exception $e) {
                             $pesan_error = "Gagal menghapus log kedatangan: " . $e->getMessage();
@@ -443,6 +528,7 @@ if ($is_logged_in) {
                 $pesan_error = "Sistem Cooldown. Tunggu beberapa saat lagi.";
             } else {
                 $supplier_id = intval($_POST['supplier_id'] ?? 0);
+                $barang_id   = filter_var($_POST['barang_id'] ?? null, FILTER_VALIDATE_INT) ?: null;
                 $raw_jumlah  = trim($_POST['jumlah'] ?? '');
                 $jumlah      = ($raw_jumlah !== '' && is_numeric($raw_jumlah)) ? (int)$raw_jumlah : 0;
                 $satuan_id   = filter_var($_POST['satuan_id'] ?? null, FILTER_VALIDATE_INT);
@@ -450,30 +536,13 @@ if ($is_logged_in) {
 
                 if ($supplier_id > 0) {
                     try {
-                        $stmtSup = $pdo->prepare("
-                            SELECT ms.jenis_barang, kb.nama_kategori 
-                            FROM merchant_supplier ms
-                            LEFT JOIN merchant_kategori_barang kb ON ms.kategori_id = kb.kategori_id
-                            WHERE ms.supplier_id = ? LIMIT 1
-                        ");
-                        $stmtSup->execute([$supplier_id]);
-                        $supInfo = $stmtSup->fetch(PDO::FETCH_ASSOC);
-
-                        $jenis_barang = $supInfo['jenis_barang'] ?? '-';
-                        $kategori     = $supInfo['nama_kategori'] ?? '-';
-
-                        if ($jumlah > 0 && $satuan_id) {
-                            $stmtSat = $pdo->prepare("SELECT nama_satuan FROM merchant_satuan_barang WHERE satuan_id = ?");
-                            $stmtSat->execute([$satuan_id]);
-                            $nama_satuan = $stmtSat->fetchColumn() ?: '';
-
-                            $teks_kategori = ($kategori !== '-') ? " ({$kategori})" : "";
-                        } else {
-                            $jumlah        = 0;
-                            $satuan_id     = null;
+                        if ($jumlah <= 0 || !$satuan_id) {
+                            $jumlah    = 0;
+                            $satuan_id = null;
+                            $barang_id = null;
                         }
-                        $stmt = $pdo->prepare("INSERT INTO merchant_log_akses_supplier (supplier_id, jumlah, satuan_id, waktu_masuk) VALUES (?, ?, ?, ?)");
-                        $stmt->execute([$supplier_id, $jumlah, $satuan_id, $waktu_masuk]);
+                        $stmt = $pdo->prepare("INSERT INTO merchant_log_akses_supplier (supplier_id, barang_id, jumlah, satuan_id, waktu_masuk) VALUES (?, ?, ?, ?, ?)");
+                        $stmt->execute([$supplier_id, $barang_id, $jumlah, $satuan_id, $waktu_masuk]);
                         $_SESSION['last_supplier_entry'] = time();
                         $pesan_sukses = "Data kedatangan supplier berhasil dicatat!";
                     } catch (Exception $e) {
@@ -505,18 +574,20 @@ if ($is_logged_in) {
     // 7. AMBIL DATA UNTUK TAB 1: MASTER SUPPLIER
     // ==========================================
     $search_keyword = trim($_GET['search'] ?? '');
-    $sql = "SELECT ms.*, kb.nama_kategori 
+    $sql = "SELECT ms.*, kb.nama_kategori,
+                   GROUP_CONCAT(msb.nama_barang ORDER BY msb.barang_id ASC SEPARATOR ', ') AS daftar_barang
             FROM merchant_supplier ms 
             LEFT JOIN merchant_kategori_barang kb ON ms.kategori_id = kb.kategori_id 
+            LEFT JOIN merchant_supplier_barang msb ON ms.supplier_id = msb.supplier_id
             WHERE 1=1";
     $params = [];
 
     if (!empty($search_keyword)) {
-        $sql .= " AND (ms.nama_supplier LIKE ? OR ms.alamat LIKE ? OR ms.jenis_barang LIKE ? OR ms.no_hp LIKE ? OR kb.nama_kategori LIKE ?)";
+        $sql .= " AND (ms.nama_supplier LIKE ? OR ms.alamat LIKE ? OR msb.nama_barang LIKE ? OR ms.no_hp LIKE ? OR kb.nama_kategori LIKE ?)";
         $searchTerm = "%" . $search_keyword . "%";
         array_push($params, $searchTerm, $searchTerm, $searchTerm, $searchTerm, $searchTerm);
     }
-    $sql .= " ORDER BY ms.supplier_id DESC";
+    $sql .= " GROUP BY ms.supplier_id ORDER BY ms.supplier_id DESC";
 
     try {
         $stmt = $pdo->prepare($sql);
@@ -525,6 +596,20 @@ if ($is_logged_in) {
         if (!is_array($data_supplier)) $data_supplier = [];
     } catch (Exception $e) {
         $data_supplier = [];
+    }
+
+    // Ambil mapping barang per supplier untuk dropdown dinamis di Tab 2
+    $barang_per_supplier = [];
+    try {
+        $all_brg = $pdo->query("SELECT barang_id, supplier_id, nama_barang FROM merchant_supplier_barang ORDER BY nama_barang ASC")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($all_brg as $b) {
+            $barang_per_supplier[$b['supplier_id']][] = [
+                'id'   => $b['barang_id'],
+                'nama' => $b['nama_barang']
+            ];
+        }
+    } catch (Exception $e) {
+        $barang_per_supplier = [];
     }
 
     // ==========================================
@@ -554,33 +639,122 @@ if ($is_logged_in) {
         '11' => 'November',
         '12' => 'Desember'
     ];
+    $log_bulan  = $_GET['log_bulan'] ?? '';
+    $log_tahun  = $_GET['log_tahun'] ?? '';
+    $log_search = trim($_GET['log_search'] ?? '');
 
-    $log_bulan = $_GET['log_bulan'] ?? '';
-    $log_tahun = $_GET['log_tahun'] ?? '';
-
-    $stmt_count = $pdo->prepare("SELECT COUNT(*) FROM merchant_log_akses_supplier WHERE MONTH(waktu_masuk) = ? AND YEAR(waktu_masuk) = ?");
-    $stmt_count->execute([$bulan_ini, $tahun_ini]);
-    $total_masuk_bulan_ini = $stmt_count->fetchColumn();
-
-    $sql_log = "SELECT l.{$log_pk_col} AS log_id, l.jumlah, l.waktu_masuk, 
-                       m.nama_supplier, m.jenis_barang, 
-                       kb.nama_kategori, sb.nama_satuan
-                FROM merchant_log_akses_supplier l 
-                LEFT JOIN merchant_supplier m ON l.supplier_id = m.supplier_id 
-                LEFT JOIN merchant_kategori_barang kb ON m.kategori_id = kb.kategori_id
-                LEFT JOIN merchant_satuan_barang sb ON l.satuan_id = sb.satuan_id
-                WHERE 1=1";
+    // 1. Filter untuk tabel Riwayat Kedatangan
+    $where_log  = " WHERE 1=1 ";
     $params_log = [];
 
     if (!empty($log_bulan)) {
-        $sql_log .= " AND MONTH(l.waktu_masuk) = ?";
+        $where_log .= " AND MONTH(l.waktu_masuk) = ? ";
         $params_log[] = $log_bulan;
     }
     if (!empty($log_tahun)) {
-        $sql_log .= " AND YEAR(l.waktu_masuk) = ?";
+        $where_log .= " AND YEAR(l.waktu_masuk) = ? ";
         $params_log[] = $log_tahun;
     }
-    $sql_log .= " ORDER BY l.waktu_masuk DESC";
+    if (!empty($log_search)) {
+        $where_log .= " AND (m.nama_supplier LIKE ? OR msb.nama_barang LIKE ? OR kb.nama_kategori LIKE ?) ";
+        $term = "%" . $log_search . "%";
+        array_push($params_log, $term, $term, $term);
+    }
+
+    // 2. Filter untuk Kartu Ringkasan Statistik
+    if (empty($log_bulan) && empty($log_tahun) && empty($log_search)) {
+        $where_stat    = " WHERE MONTH(l.waktu_masuk) = ? AND YEAR(l.waktu_masuk) = ? ";
+        $params_stat   = [$bulan_ini, $tahun_ini];
+        $label_periode = "BULAN INI (" . strtoupper($daftar_bulan[$bulan_ini]) . ")";
+    } else {
+        $where_stat  = $where_log;
+        $params_stat = $params_log;
+
+        $label_parts = [];
+        if (!empty($log_search)) $label_parts[] = '"' . strtoupper($log_search) . '"';
+        if (!empty($log_bulan))  $label_parts[] = strtoupper($daftar_bulan[$log_bulan] ?? '');
+        if (!empty($log_tahun))  $label_parts[] = $log_tahun;
+        $label_periode = implode(' - ', $label_parts);
+    }
+
+    // Total Kedatangan (dihitung per sesi kedatangan unik supplier + waktu_masuk)
+    try {
+        $stmt_count = $pdo->prepare("
+            SELECT COUNT(DISTINCT CONCAT(COALESCE(l.supplier_id, 0), '_', l.waktu_masuk)) 
+            FROM merchant_log_akses_supplier l
+            LEFT JOIN merchant_supplier m ON l.supplier_id = m.supplier_id
+            LEFT JOIN merchant_supplier_barang msb ON l.barang_id = msb.barang_id
+            LEFT JOIN merchant_kategori_barang kb ON m.kategori_id = kb.kategori_id
+            {$where_stat}
+        ");
+        $stmt_count->execute($params_stat);
+        $total_masuk_periode = (int)$stmt_count->fetchColumn();
+    } catch (Exception $e) {
+        $total_masuk_periode = 0;
+    }
+
+    // Kedatangan per Kategori Barang sesuai filter
+    try {
+        $stmt_kat_periode = $pdo->prepare("
+            SELECT COALESCE(kb.nama_kategori, 'Tanpa Kategori') AS nama_kategori, 
+                   COUNT(DISTINCT CONCAT(COALESCE(l.supplier_id, 0), '_', l.waktu_masuk)) AS total
+            FROM merchant_log_akses_supplier l
+            LEFT JOIN merchant_supplier m ON l.supplier_id = m.supplier_id
+            LEFT JOIN merchant_supplier_barang msb ON l.barang_id = msb.barang_id
+            LEFT JOIN merchant_kategori_barang kb ON m.kategori_id = kb.kategori_id
+            {$where_stat}
+            GROUP BY nama_kategori
+            ORDER BY total DESC
+        ");
+        $stmt_kat_periode->execute($params_stat);
+        $statistik_kategori_periode = $stmt_kat_periode->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        $statistik_kategori_periode = [];
+    }
+
+    // Kedatangan per Jenis Barang sesuai filter
+    try {
+        $stmt_jenis_periode = $pdo->prepare("
+            SELECT COALESCE(NULLIF(TRIM(msb.nama_barang), ''), 'Tanpa Barang') AS jenis_barang, COUNT(l.{$log_pk_col}) AS total
+            FROM merchant_log_akses_supplier l
+            LEFT JOIN merchant_supplier m ON l.supplier_id = m.supplier_id
+            LEFT JOIN merchant_supplier_barang msb ON l.barang_id = msb.barang_id
+            LEFT JOIN merchant_kategori_barang kb ON m.kategori_id = kb.kategori_id
+            {$where_stat}
+            GROUP BY jenis_barang
+            ORDER BY total DESC
+        ");
+        $stmt_jenis_periode->execute($params_stat);
+        $statistik_jenis_periode = $stmt_jenis_periode->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {
+        $statistik_jenis_periode = [];
+    }
+
+    // Query Utama Tabel Riwayat Kedatangan (DIGABUNG 1 BARIS PER KEDATANGAN)
+    $sql_log = "SELECT GROUP_CONCAT(l.{$log_pk_col} ORDER BY l.{$log_pk_col} ASC SEPARATOR ',') AS log_ids,
+                       l.waktu_masuk, 
+                       m.nama_supplier, 
+                       kb.nama_kategori,
+                       GROUP_CONCAT(
+                           CASE 
+                               WHEN l.jumlah > 0 THEN CONCAT(
+                                   COALESCE(msb.nama_barang, 'Barang'), ' (', l.jumlah, 
+                                   IF(sb.nama_satuan IS NOT NULL AND sb.nama_satuan != '', CONCAT(' ', sb.nama_satuan), ''), 
+                                   ')'
+                               )
+                               WHEN msb.nama_barang IS NOT NULL AND msb.nama_barang != '' THEN msb.nama_barang
+                               ELSE NULL
+                           END
+                           ORDER BY l.{$log_pk_col} ASC SEPARATOR '||'
+                       ) AS rincian_items
+                FROM merchant_log_akses_supplier l 
+                LEFT JOIN merchant_supplier m ON l.supplier_id = m.supplier_id 
+                LEFT JOIN merchant_supplier_barang msb ON l.barang_id = msb.barang_id
+                LEFT JOIN merchant_kategori_barang kb ON m.kategori_id = kb.kategori_id
+                LEFT JOIN merchant_satuan_barang sb ON l.satuan_id = sb.satuan_id
+                {$where_log}
+                GROUP BY l.supplier_id, l.waktu_masuk
+                ORDER BY l.waktu_masuk DESC";
 
     try {
         $stmt_log = $pdo->prepare($sql_log);
@@ -852,11 +1026,11 @@ if ($is_logged_in) {
                                 <thead>
                                     <tr class="text-center">
                                         <th width="5%">ID</th>
-                                        <th width="20%">Nama Supplier</th>
-                                        <th width="20%">Alamat</th>
+                                        <th width="18%">Nama Supplier</th>
+                                        <th width="17%">Alamat</th>
                                         <th width="14%">No. Handphone</th>
-                                        <th width="13%">Jenis Barang</th>
-                                        <th width="15%">Kategori</th>
+                                        <th width="20%">Jenis Barang</th>
+                                        <th width="13%">Kategori</th>
                                         <?php if (($_SESSION['role'] ?? '') === 'admin'): ?><th width="13%">Aksi</th><?php endif; ?>
                                     </tr>
                                 </thead>
@@ -872,7 +1046,15 @@ if ($is_logged_in) {
                                                         <a href="https://wa.me/<?= preg_replace('/^0/', '62', preg_replace('/[^0-9]/', '', $row['no_hp'])) ?>" target="_blank" class="text-decoration-none text-success fw-semibold"><i class="fa-brands fa-whatsapp me-1"></i><?= htmlspecialchars($row['no_hp']) ?></a>
                                                         <?php else: ?>-<?php endif; ?>
                                                 </td>
-                                                <td><span class="badge bg-primary badge-barang"><?= htmlspecialchars($row['jenis_barang'] ?? '-') ?></span></td>
+                                                <td>
+                                                    <?php if (!empty($row['daftar_barang'])): ?>
+                                                        <?php foreach (explode(', ', $row['daftar_barang']) as $brg_item): ?>
+                                                            <span class="badge bg-primary badge-barang mb-1"><?= htmlspecialchars($brg_item) ?></span>
+                                                        <?php endforeach; ?>
+                                                    <?php else: ?>
+                                                        <span class="text-muted small">-</span>
+                                                    <?php endif; ?>
+                                                </td>
                                                 <td><span class="badge bg-info text-dark badge-barang"><?= htmlspecialchars($row['nama_kategori'] ?? '-') ?></span></td>
                                                 <?php if (($_SESSION['role'] ?? '') === 'admin'): ?>
                                                     <td class="text-center text-nowrap">
@@ -881,7 +1063,7 @@ if ($is_logged_in) {
                                                             data-nama="<?= htmlspecialchars($row['nama_supplier'] ?? '', ENT_QUOTES) ?>"
                                                             data-alamat="<?= htmlspecialchars($row['alamat'] ?? '', ENT_QUOTES) ?>"
                                                             data-nohp="<?= htmlspecialchars($row['no_hp'] ?? '', ENT_QUOTES) ?>"
-                                                            data-jenis="<?= htmlspecialchars($row['jenis_barang'] ?? '', ENT_QUOTES) ?>"
+                                                            data-jenis="<?= htmlspecialchars($row['daftar_barang'] ?? '', ENT_QUOTES) ?>"
                                                             data-kategori="<?= htmlspecialchars($row['kategori_id'] ?? '', ENT_QUOTES) ?>"
                                                             title="Edit Supplier"><i class="fa-solid fa-pen-to-square"></i></button>
                                                         <button class="btn btn-sm btn-outline-secondary me-1 btn-edit-password"
@@ -909,16 +1091,64 @@ if ($is_logged_in) {
 
                 <!-- TAB 2: AREA KIOS & LOG -->
                 <div class="tab-pane fade" id="logkios">
-                    <div class="row">
-                        <div class="col-md-5 col-lg-4">
-                            <div class="card card-custom p-4 bg-primary text-white border-0 mb-4">
-                                <div class="d-flex align-items-center justify-content-between">
-                                    <div><small class="text-white-50 fw-bold d-block mb-1">KEDATANGAN BULAN INI</small>
-                                        <h2 class="fw-bold mb-0 text-white"><?= $total_masuk_bulan_ini ?> <span class="fs-6 fw-normal">Kali</span></h2>
+
+                    <!-- RINGKASAN STATISTIK DINAMIS -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-4 col-lg-3">
+                            <div class="card card-custom p-3 bg-primary text-white border-0 h-100 mb-0">
+                                <div class="d-flex align-items-center justify-content-between h-100">
+                                    <div>
+                                        <small class="text-white-50 fw-bold d-block mb-1" style="font-size: 0.75rem;">
+                                            TOTAL MASUK (<?= htmlspecialchars($label_periode) ?>)
+                                        </small>
+                                        <h2 class="fw-bold mb-0 text-white"><?= $total_masuk_periode ?> <span class="fs-6 fw-normal">Kali</span></h2>
                                     </div>
-                                    <i class="fa-solid fa-calendar-check fa-3x text-white-50"></i>
+                                    <i class="fa-solid fa-calendar-check fa-2x text-white-50"></i>
                                 </div>
                             </div>
+                        </div>
+
+                        <div class="col-md-4 col-lg-5">
+                            <div class="card card-custom p-3 border-start border-4 border-info h-100 mb-0">
+                                <small class="text-muted fw-bold d-block mb-2" style="font-size: 0.75rem;">
+                                    <i class="fa-solid fa-layer-group text-info me-1"></i> KEDATANGAN PER KATEGORI (<?= htmlspecialchars($label_periode) ?>)
+                                </small>
+                                <?php if (!empty($statistik_kategori_periode)): ?>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <?php foreach ($statistik_kategori_periode as $stat_kat): ?>
+                                            <span class="badge bg-info-subtle text-dark border border-info-subtle px-2 py-1" style="font-size: 0.8rem;">
+                                                <?= htmlspecialchars($stat_kat['nama_kategori']) ?>: <strong><?= $stat_kat['total'] ?></strong>
+                                            </span>
+                                        <?php endforeach; ?>
+                                    </div>
+                                <?php else: ?>
+                                    <span class="text-muted small">Tidak ada kedatangan pada periode ini.</span>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4 col-lg-4">
+                            <div class="card card-custom p-3 border-start border-4 border-warning h-100 mb-0">
+                                <small class="text-muted fw-bold d-block mb-2" style="font-size: 0.75rem;">
+                                    <i class="fa-solid fa-tags text-warning me-1"></i> RINCIAN JENIS BARANG (<?= htmlspecialchars($label_periode) ?>)
+                                </small>
+                                <?php if (!empty($statistik_jenis_periode)): ?>
+                                    <div class="d-flex flex-wrap gap-2" style="max-height: 75px; overflow-y: auto;">
+                                        <?php foreach ($statistik_jenis_periode as $stat_jns): ?>
+                                            <span class="badge bg-light text-dark border px-2 py-1" style="font-size: 0.8rem;">
+                                                <?= htmlspecialchars(ucwords(strtolower($stat_jns['jenis_barang']))) ?>: <strong class="text-primary"><?= $stat_jns['total'] ?></strong>
+                                            </span>
+                                        <?php endforeach; ?>
+                                    </div>
+                                <?php else: ?>
+                                    <span class="text-muted small">Tidak ada data jenis barang pada periode ini.</span>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-5 col-lg-4">
                             <div class="card card-custom p-4 border-start border-4 border-success">
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <h6 class="fw-bold mb-0 text-dark"><i class="fa-solid fa-box-open text-primary me-2"></i> Lapor Kedatangan Baru</h6>
@@ -928,20 +1158,26 @@ if ($is_logged_in) {
                                     <input type="hidden" name="action" value="simpan_akses">
                                     <div class="mb-3">
                                         <label class="form-label text-muted fw-semibold small">Pilih Supplier <span class="text-danger">*</span></label>
-                                        <select name="supplier_id" class="form-select" required>
+                                        <select name="supplier_id" id="selectSupplierLog" class="form-select" required>
                                             <option value="">-- Pilih Supplier --</option>
                                             <?php
                                             $stmt_all = $pdo->query("
-                                                SELECT ms.supplier_id, ms.nama_supplier, ms.jenis_barang, kb.nama_kategori 
+                                                SELECT ms.supplier_id, ms.nama_supplier, kb.nama_kategori 
                                                 FROM merchant_supplier ms
                                                 LEFT JOIN merchant_kategori_barang kb ON ms.kategori_id = kb.kategori_id
                                                 ORDER BY ms.nama_supplier ASC
                                             ");
                                             while ($sup = $stmt_all->fetch()) {
-                                                $kat = !empty($sup['nama_kategori']) ? " - {$sup['nama_kategori']}" : "";
-                                                echo "<option value='{$sup['supplier_id']}'>" . htmlspecialchars("{$sup['nama_supplier']} ({$sup['jenis_barang']}{$kat})") . "</option>";
+                                                $kat = !empty($sup['nama_kategori']) ? " ({$sup['nama_kategori']})" : "";
+                                                echo "<option value='{$sup['supplier_id']}'>" . htmlspecialchars("{$sup['nama_supplier']}{$kat}") . "</option>";
                                             }
                                             ?>
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label text-muted fw-semibold small">Jenis Barang <span class="fw-normal">(Opsional)</span></label>
+                                        <select name="barang_id" id="selectBarangLog" class="form-select">
+                                            <option value="">-- Pilih Supplier Terlebih Dahulu --</option>
                                         </select>
                                     </div>
                                     <div class="mb-3">
@@ -966,11 +1202,17 @@ if ($is_logged_in) {
                             <div class="card card-custom p-4 h-100">
                                 <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-3">
                                     <h6 class="fw-bold text-dark mb-0"><i class="fa-solid fa-table-list text-primary me-2"></i> Riwayat Kedatangan</h6>
-                                    <span class="badge bg-secondary"><?= count($riwayat_akses) ?> Data Ditemukan</span>
+                                    <span class="badge bg-secondary"><?= count($riwayat_akses) ?> Kedatangan</span>
                                 </div>
 
                                 <form method="GET" action="" class="row g-2 mb-3">
                                     <div class="col-md-4">
+                                        <div class="input-group input-group-sm">
+                                            <input type="text" name="log_search" class="form-control" placeholder="Cari nama supplier / barang..." value="<?= htmlspecialchars($log_search) ?>">
+                                            <button type="submit" class="btn btn-primary" title="Cari"><i class="fa-solid fa-search"></i></button>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
                                         <select name="log_bulan" class="form-select form-select-sm" onchange="this.form.submit()">
                                             <option value="">-- Semua Bulan --</option>
                                             <?php foreach ($daftar_bulan as $key => $nama_bulan): ?>
@@ -978,16 +1220,17 @@ if ($is_logged_in) {
                                             <?php endforeach; ?>
                                         </select>
                                     </div>
-                                    <div class="col-md-3">
+                                    <div class="col-md-2">
                                         <select name="log_tahun" class="form-select form-select-sm" onchange="this.form.submit()">
-                                            <option value="">-- Semua Tahun --</option>
+                                            <option value="">-- Tahun --</option>
                                             <?php foreach ($list_tahun_log as $th): ?>
                                                 <option value="<?= $th ?>" <?= ($log_tahun == $th) ? 'selected' : '' ?>><?= $th ?></option>
                                             <?php endforeach; ?>
                                         </select>
                                     </div>
-                                    <div class="col-md-5 d-flex gap-2">
-                                        <a href="?export=excel&log_bulan=<?= $log_bulan ?>&log_tahun=<?= $log_tahun ?>" class="btn btn-success btn-sm w-100"><i class="fa-solid fa-file-excel"></i> Export Excel</a>
+                                    <div class="col-md-3 d-flex gap-1">
+                                        <a href="admin_supplierr.php?tab=logkios" class="btn btn-outline-secondary btn-sm" title="Reset Filter"><i class="fa-solid fa-rotate-right"></i></a>
+                                        <a href="?export=excel&log_bulan=<?= urlencode($log_bulan) ?>&log_tahun=<?= urlencode($log_tahun) ?>&log_search=<?= urlencode($log_search) ?>" class="btn btn-success btn-sm w-100"><i class="fa-solid fa-file-excel"></i> Excel</a>
                                     </div>
                                 </form>
 
@@ -1001,7 +1244,7 @@ if ($is_logged_in) {
                                                     <tr>
                                                         <th>Waktu</th>
                                                         <th>Supplier & Kategori</th>
-                                                        <th>Jumlah Bawaan</th>
+                                                        <th>Barang & Jumlah Bawaan</th>
                                                         <?php if (($_SESSION['role'] ?? '') === 'admin'): ?>
                                                             <th class="text-center" width="10%">Aksi</th>
                                                         <?php endif; ?>
@@ -1016,21 +1259,26 @@ if ($is_logged_in) {
                                                             </td>
                                                             <td>
                                                                 <span class="fw-bold text-primary"><?= htmlspecialchars($log['nama_supplier'] ?? 'Unknown') ?></span><br>
-                                                                <span class="badge bg-primary" style="font-size:0.68rem;"><?= htmlspecialchars($log['jenis_barang'] ?? '-') ?></span>
                                                                 <span class="badge bg-info text-dark" style="font-size:0.68rem;"><?= htmlspecialchars($log['nama_kategori'] ?? '-') ?></span>
                                                             </td>
                                                             <td style="font-size:0.85rem;">
-                                                                <?php if (!empty($log['jumlah']) && $log['jumlah'] > 0): ?>
-                                                                    <span class="fw-bold text-dark"><?= htmlspecialchars($log['jumlah'] . ' ' . ($log['nama_satuan'] ?? '')) ?></span>
+                                                                <?php if (!empty($log['rincian_items'])): ?>
+                                                                    <div class="d-flex flex-wrap gap-1">
+                                                                        <?php foreach (explode('||', $log['rincian_items']) as $item_str): ?>
+                                                                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle fw-semibold" style="font-size: 0.78rem;">
+                                                                                <?= htmlspecialchars($item_str) ?>
+                                                                            </span>
+                                                                        <?php endforeach; ?>
+                                                                    </div>
                                                                 <?php else: ?>
                                                                     <span class="text-muted">-</span>
                                                                 <?php endif; ?>
                                                             </td>
                                                             <?php if (($_SESSION['role'] ?? '') === 'admin'): ?>
                                                                 <td class="text-center">
-                                                                    <form method="POST" action="" class="d-inline" onsubmit="return confirm('Apakah Anda yakin ingin menghapus data log kedatangan ini?');">
+                                                                    <form method="POST" action="" class="d-inline" onsubmit="return confirm('Apakah Anda yakin ingin menghapus data kedatangan ini?');">
                                                                         <input type="hidden" name="action" value="hapus_log">
-                                                                        <input type="hidden" name="log_id" value="<?= $log['log_id'] ?>">
+                                                                        <input type="hidden" name="log_ids" value="<?= htmlspecialchars($log['log_ids']) ?>">
                                                                         <button type="submit" class="btn btn-sm btn-outline-danger" title="Hapus Log"><i class="fa-solid fa-trash-can"></i></button>
                                                                     </form>
                                                                 </td>
@@ -1051,7 +1299,6 @@ if ($is_logged_in) {
                 <?php if (($_SESSION['role'] ?? '') === 'admin'): ?>
                     <div class="tab-pane fade" id="masterdata">
                         <div class="row g-4">
-                            <!-- KOLOM KIRI: KATEGORI BARANG -->
                             <div class="col-md-6">
                                 <div class="table-container h-100">
                                     <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
@@ -1103,7 +1350,6 @@ if ($is_logged_in) {
                                 </div>
                             </div>
 
-                            <!-- KOLOM KANAN: SATUAN BARANG -->
                             <div class="col-md-6">
                                 <div class="table-container h-100">
                                     <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
@@ -1264,7 +1510,10 @@ if ($is_logged_in) {
                             <div class="col-12"><label class="form-label small fw-bold">Nama Supplier <span class="text-danger">*</span></label><input type="text" name="nama_supplier" class="form-control form-control-sm" required></div>
                             <div class="col-12"><label class="form-label small fw-bold">Alamat</label><input type="text" name="alamat" class="form-control form-control-sm"></div>
                             <div class="col-md-6"><label class="form-label small fw-bold">No. Handphone</label><input type="text" name="no_hp" class="form-control form-control-sm"></div>
-                            <div class="col-md-6"><label class="form-label small fw-bold">Jenis Barang <span class="text-danger">*</span></label><input type="text" name="jenis_barang" class="form-control form-control-sm" placeholder="Misal: BATIK, TELUR..." required></div>
+                            <div class="col-md-6">
+                                <label class="form-label small fw-bold">Jenis Barang <span class="fw-normal text-muted">(Pisah koma)</span></label>
+                                <input type="text" name="jenis_barang" class="form-control form-control-sm" placeholder="Contoh: BATIK, Daster">
+                            </div>
                             <div class="col-12">
                                 <label class="form-label small fw-bold">Kategori Barang</label>
                                 <select name="kategori_id" class="form-select form-select-sm">
@@ -1274,7 +1523,7 @@ if ($is_logged_in) {
                                     <?php endforeach; ?>
                                 </select>
                             </div>
-                            <div class="col-12"><small class="text-muted d-block mt-1">* Password akan diset default: "12345"</small></div>
+                            <div class="col-12"><small class="text-muted d-block mt-1">* Password default otomatis: Nama Supplier tanpa spasi</small></div>
                         </div>
                         <div class="modal-footer"><button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Batal</button><button type="submit" class="btn btn-success btn-sm">Simpan</button></div>
                     </form>
@@ -1292,7 +1541,10 @@ if ($is_logged_in) {
                             <div class="col-12"><label class="form-label small fw-bold">Nama Supplier <span class="text-danger">*</span></label><input type="text" name="nama_supplier" id="edit_nama" class="form-control form-control-sm" required></div>
                             <div class="col-12"><label class="form-label small fw-bold">Alamat</label><input type="text" name="alamat" id="edit_alamat" class="form-control form-control-sm"></div>
                             <div class="col-md-6"><label class="form-label small fw-bold">No. Handphone</label><input type="text" name="no_hp" id="edit_nohp" class="form-control form-control-sm"></div>
-                            <div class="col-md-6"><label class="form-label small fw-bold">Jenis Barang <span class="text-danger">*</span></label><input type="text" name="jenis_barang" id="edit_jenis" class="form-control form-control-sm" required></div>
+                            <div class="col-md-6">
+                                <label class="form-label small fw-bold">Jenis Barang <span class="fw-normal text-muted">(Pisah koma)</span></label>
+                                <input type="text" name="jenis_barang" id="edit_jenis" class="form-control form-control-sm" placeholder="Contoh: BATIK, Daster">
+                            </div>
                             <div class="col-12">
                                 <label class="form-label small fw-bold">Kategori Barang</label>
                                 <select name="kategori_id" id="edit_kategori" class="form-select form-select-sm">
@@ -1521,7 +1773,38 @@ if ($is_logged_in) {
 
     <?php if ($is_logged_in): ?>
         <script>
+            const barangPerSupplier = <?= json_encode($barang_per_supplier) ?>;
+
             document.addEventListener('DOMContentLoaded', function() {
+                // Dropdown Dinamis Jenis Barang saat Admin memilih Supplier di Tab Log Kios
+                const selectSupplierLog = document.getElementById('selectSupplierLog');
+                const selectBarangLog = document.getElementById('selectBarangLog');
+
+                if (selectSupplierLog && selectBarangLog) {
+                    selectSupplierLog.addEventListener('change', function() {
+                        const supId = this.value;
+                        selectBarangLog.innerHTML = '';
+
+                        if (!supId) {
+                            selectBarangLog.innerHTML = '<option value="">-- Pilih Supplier Terlebih Dahulu --</option>';
+                            return;
+                        }
+
+                        const daftar = barangPerSupplier[supId] || [];
+                        if (daftar.length === 0) {
+                            selectBarangLog.innerHTML = '<option value="">-- Tidak ada barang terdaftar (Lapor tanpa barang) --</option>';
+                        } else {
+                            selectBarangLog.innerHTML = '<option value="">-- Pilih Barang (Opsional) --</option>';
+                            daftar.forEach(item => {
+                                const opt = document.createElement('option');
+                                opt.value = item.id;
+                                opt.textContent = item.nama;
+                                selectBarangLog.appendChild(opt);
+                            });
+                        }
+                    });
+                }
+
                 // Modal Edit Supplier
                 const editModalEl = document.getElementById('modalEdit');
                 if (editModalEl) {
@@ -1609,7 +1892,7 @@ if ($is_logged_in) {
                 // Auto-switch Tab berdasarkan aksi terakhir
                 <?php if (isset($_POST['action']) && in_array($_POST['action'], ['simpan_akses', 'hapus_log'])): ?>
                     new bootstrap.Tab(document.querySelector('#logkios-tab')).show();
-                <?php elseif (isset($_GET['log_bulan']) || isset($_GET['log_tahun'])): ?>
+                <?php elseif (isset($_GET['log_bulan']) || isset($_GET['log_tahun']) || isset($_GET['log_search']) || (($_GET['tab'] ?? '') === 'logkios')): ?>
                     new bootstrap.Tab(document.querySelector('#logkios-tab')).show();
                 <?php elseif (isset($_POST['action']) && in_array($_POST['action'], ['tambah_kategori', 'edit_kategori', 'hapus_kategori', 'tambah_satuan', 'edit_satuan', 'hapus_satuan'])): ?>
                     var masterTabEl = document.querySelector('#masterdata-tab');

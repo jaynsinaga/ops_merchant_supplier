@@ -9,7 +9,7 @@ require_once '../../config/database.php';
 // Konfigurasi Target POS & Geofencing Radius 100 Meter
 define('POS_LAT', -7.753053);
 define('POS_LNG', 110.495028);
-define('MAX_DISTANCE_METERS', 100);
+define('MAX_DISTANCE_METERS', 1000);
 define('INPUT_COOLDOWN_SECONDS', 60);
 
 function getDistanceHaversine($lat1, $lon1, $lat2, $lon2)
@@ -46,7 +46,6 @@ if (isset($_GET['action']) && $_GET['action'] === 'logout') {
         $_SESSION['supplier_nama'],
         $_SESSION['supplier_alamat'],
         $_SESSION['supplier_no_hp'],
-        $_SESSION['supplier_jenis_barang'],
         $_SESSION['supplier_kategori']
     );
     header('Location: ' . $_SERVER['PHP_SELF']);
@@ -54,7 +53,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'logout') {
 }
 
 // ==========================================
-// 2. TANGKAP REQUEST POST (LOGIN & SUBMIT)
+// 2. TANGKAP REQUEST POST
 // ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
@@ -78,7 +77,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if (!empty($nama_supplier) && !empty($password)) {
                 try {
-                    // Ambil data supplier beserta nama_kategori dari merchant_kategori_barang
                     $sql = "SELECT ms.*, kb.nama_kategori 
                             FROM merchant_supplier ms
                             LEFT JOIN merchant_kategori_barang kb ON ms.kategori_id = kb.kategori_id
@@ -101,13 +99,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             if (!$supplier_id) {
                                 $pesan_error = "Sistem error: ID Supplier tidak valid.";
                             } else {
-                                $_SESSION['supplier_logged_in']    = true;
-                                $_SESSION['supplier_id']           = $supplier_id;
-                                $_SESSION['supplier_nama']         = $supplier['nama_supplier'];
-                                $_SESSION['supplier_alamat']       = $supplier['alamat'] ?? '-';
-                                $_SESSION['supplier_no_hp']        = $supplier['no_hp'] ?? '-';
-                                $_SESSION['supplier_jenis_barang'] = $supplier['jenis_barang'] ?? '-';
-                                $_SESSION['supplier_kategori']     = !empty($supplier['nama_kategori']) ? $supplier['nama_kategori'] : '-';
+                                $_SESSION['supplier_logged_in'] = true;
+                                $_SESSION['supplier_id']        = $supplier_id;
+                                $_SESSION['supplier_nama']      = $supplier['nama_supplier'];
+                                $_SESSION['supplier_alamat']    = $supplier['alamat'] ?? '-';
+                                $_SESSION['supplier_no_hp']     = $supplier['no_hp'] ?? '-';
+                                $_SESSION['supplier_kategori']  = !empty($supplier['nama_kategori']) ? $supplier['nama_kategori'] : '-';
 
                                 header('Location: ' . $_SERVER['PHP_SELF']);
                                 exit;
@@ -127,7 +124,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // --- AKSI B: PROSES SUBMIT BARANG (JUMLAH OPSIONAL) ---
+    // --- AKSI B: TAMBAH JENIS BARANG BARU KE PROFIL SUPPLIER ---
+    if (isset($_POST['action']) && $_POST['action'] === 'tambah_barang' && isset($_SESSION['supplier_logged_in'])) {
+        $nama_barang_baru = trim($_POST['nama_barang_baru'] ?? '');
+        $supplier_id      = $_SESSION['supplier_id'];
+
+        if (!empty($nama_barang_baru)) {
+            try {
+                // Cek duplikasi nama barang pada supplier yang sama
+                $stmtCek = $pdo->prepare("SELECT COUNT(*) FROM merchant_supplier_barang WHERE supplier_id = ? AND LOWER(nama_barang) = LOWER(?)");
+                $stmtCek->execute([$supplier_id, $nama_barang_baru]);
+
+                if ($stmtCek->fetchColumn() > 0) {
+                    $_SESSION['flash_error'] = "Barang '{$nama_barang_baru}' sudah ada di daftar Anda.";
+                } else {
+                    $stmtIns = $pdo->prepare("INSERT INTO merchant_supplier_barang (supplier_id, nama_barang) VALUES (?, ?)");
+                    $stmtIns->execute([$supplier_id, $nama_barang_baru]);
+                    $_SESSION['flash_sukses'] = "Jenis barang '{$nama_barang_baru}' berhasil disimpan!";
+                }
+            } catch (PDOException $e) {
+                $_SESSION['flash_error'] = "Gagal menambah barang: " . $e->getMessage();
+            }
+        } else {
+            $_SESSION['flash_error'] = "Nama jenis barang tidak boleh kosong.";
+        }
+        header('Location: ' . $_SERVER['PHP_SELF']);
+        exit;
+    }
+
+    // --- AKSI C: HAPUS JENIS BARANG DARI PROFIL SUPPLIER ---
+    if (isset($_POST['action']) && $_POST['action'] === 'hapus_barang' && isset($_SESSION['supplier_logged_in'])) {
+        $barang_id   = filter_var($_POST['barang_id'] ?? null, FILTER_VALIDATE_INT);
+        $supplier_id = $_SESSION['supplier_id'];
+
+        if ($barang_id) {
+            try {
+                $stmtDel = $pdo->prepare("DELETE FROM merchant_supplier_barang WHERE barang_id = ? AND supplier_id = ?");
+                $stmtDel->execute([$barang_id, $supplier_id]);
+                $_SESSION['flash_sukses'] = "Jenis barang berhasil dihapus dari daftar.";
+            } catch (PDOException $e) {
+                $_SESSION['flash_error'] = "Gagal menghapus barang: " . $e->getMessage();
+            }
+        }
+        header('Location: ' . $_SERVER['PHP_SELF']);
+        exit;
+    }
+
+    // --- AKSI D: PROSES SUBMIT KEDATANGAN & JUMLAH BARANG ---
     if (isset($_POST['action']) && $_POST['action'] === 'simpan_akses' && isset($_SESSION['supplier_logged_in'])) {
         $last_submit = $_SESSION['last_supplier_entry'] ?? 0;
         $time_diff   = time() - $last_submit;
@@ -136,36 +179,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $sisa_waktu = INPUT_COOLDOWN_SECONDS - $time_diff;
             $pesan_error = "Sistem sibuk. Tunggu {$sisa_waktu} detik.";
         } else {
-            $raw_jumlah = trim($_POST['jumlah'] ?? '');
-            $jumlah     = ($raw_jumlah !== '' && is_numeric($raw_jumlah)) ? (int)$raw_jumlah : 0;
-            $satuan_id  = filter_var($_POST['satuan_id'] ?? null, FILTER_VALIDATE_INT);
-
-            $jenis_barang = $_SESSION['supplier_jenis_barang'] ?? '-';
-            $kategori     = $_SESSION['supplier_kategori'] ?? '-';
-
-            if ($jumlah > 0 && $satuan_id) {
-                $stmtSat = $pdo->prepare("SELECT nama_satuan FROM merchant_satuan_barang WHERE satuan_id = ?");
-                $stmtSat->execute([$satuan_id]);
-                $nama_satuan = $stmtSat->fetchColumn() ?: '';
-
-                $teks_kategori = ($kategori !== '-') ? " ({$kategori})" : "";
-                $detail_barang = trim("{$jumlah} {$nama_satuan} {$jenis_barang}{$teks_kategori}");
-                $notif_sukses  = "Berhasil mencatat {$jumlah} {$nama_satuan} {$jenis_barang}! Anda otomatis Logout.";
-            } else {
-                // Jika jumlah tidak diisi / 0
-                $jumlah        = 0;
-                $satuan_id     = null;
-                $detail_barang = '-';
-                $notif_sukses  = "Berhasil lapor masuk kios! Anda otomatis Logout.";
-            }
-
-            $waktu_masuk = date('Y-m-d H:i:s');
             $supplier_id = $_SESSION['supplier_id'];
+            $waktu_masuk = date('Y-m-d H:i:s');
+            $items_input = $_POST['items'] ?? []; // Array: [barang_id => ['jumlah' => ..., 'satuan_id' => ...]]
 
             try {
-                $stmt = $pdo->prepare("INSERT INTO merchant_log_akses_supplier (supplier_id, jumlah, satuan_id, waktu_masuk) VALUES (?, ?, ?, ?)");
-                $stmt->execute([$supplier_id, $jumlah, $satuan_id, $waktu_masuk]);
+                $pdo->beginTransaction();
 
+                $stmtLog = $pdo->prepare("INSERT INTO merchant_log_akses_supplier (supplier_id, barang_id, jumlah, satuan_id, waktu_masuk) VALUES (?, ?, ?, ?, ?)");
+                $ada_barang_diinput = false;
+                $ringkasan_barang   = [];
+
+                // Ambil map nama satuan untuk pesan notifikasi
+                $satuan_map = $pdo->query("SELECT satuan_id, nama_satuan FROM merchant_satuan_barang")->fetchAll(PDO::FETCH_KEY_PAIR);
+                // Ambil map nama barang milik supplier untuk validasi & notifikasi
+                $stmtBrgMap = $pdo->prepare("SELECT barang_id, nama_barang FROM merchant_supplier_barang WHERE supplier_id = ?");
+                $stmtBrgMap->execute([$supplier_id]);
+                $barang_map = $stmtBrgMap->fetchAll(PDO::FETCH_KEY_PAIR);
+
+                foreach ($items_input as $barang_id => $detail) {
+                    $barang_id = (int)$barang_id;
+                    if (!isset($barang_map[$barang_id])) continue;
+
+                    $raw_jumlah = trim($detail['jumlah'] ?? '');
+                    $jumlah     = ($raw_jumlah !== '' && is_numeric($raw_jumlah)) ? (int)$raw_jumlah : 0;
+                    $satuan_id  = filter_var($detail['satuan_id'] ?? null, FILTER_VALIDATE_INT);
+
+                    if ($jumlah > 0 && $satuan_id) {
+                        $stmtLog->execute([$supplier_id, $barang_id, $jumlah, $satuan_id, $waktu_masuk]);
+                        $ada_barang_diinput = true;
+
+                        $nama_brg = $barang_map[$barang_id];
+                        $nama_sat = $satuan_map[$satuan_id] ?? '';
+                        $ringkasan_barang[] = "{$nama_brg} ({$jumlah} {$nama_sat})";
+                    }
+                }
+
+                // Jika tidak ada barang yang diisi jumlahnya, tetap catat lapor masuk tanpa barang
+                if (!$ada_barang_diinput) {
+                    $stmtLog->execute([$supplier_id, null, 0, null, $waktu_masuk]);
+                    $notif_sukses = "Berhasil lapor masuk kios (tanpa barang)! Anda otomatis Logout.";
+                } else {
+                    $teks_ringkasan = implode(', ', $ringkasan_barang);
+                    $notif_sukses   = "Berhasil mencatat: {$teks_ringkasan}. Anda otomatis Logout.";
+                }
+
+                $pdo->commit();
                 $_SESSION['last_supplier_entry'] = time();
 
                 // LOGOUT OTOMATIS
@@ -175,7 +234,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_SESSION['supplier_nama'],
                     $_SESSION['supplier_alamat'],
                     $_SESSION['supplier_no_hp'],
-                    $_SESSION['supplier_jenis_barang'],
                     $_SESSION['supplier_kategori']
                 );
 
@@ -183,20 +241,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header('Location: ' . $_SERVER['PHP_SELF']);
                 exit;
             } catch (PDOException $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
                 $pesan_error = "Gagal menyimpan: " . $e->getMessage();
             }
         }
     }
 }
 
-// Ambil daftar satuan dari merchant_satuan_barang
+// Ambil daftar satuan & daftar barang milik supplier yang sedang login
 $list_satuan = [];
+$list_barang_supplier = [];
+
 if (isset($_SESSION['supplier_logged_in'])) {
     try {
         $stmt_satuan = $pdo->query("SELECT * FROM merchant_satuan_barang ORDER BY satuan_id ASC");
         $list_satuan = $stmt_satuan->fetchAll(PDO::FETCH_ASSOC);
+
+        $stmt_barang = $pdo->prepare("SELECT * FROM merchant_supplier_barang WHERE supplier_id = ? ORDER BY barang_id ASC");
+        $stmt_barang->execute([$_SESSION['supplier_id']]);
+        $list_barang_supplier = $stmt_barang->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
-        $pesan_error = "Gagal memuat data satuan: " . $e->getMessage();
+        $pesan_error = "Gagal memuat data: " . $e->getMessage();
     }
 }
 
@@ -284,6 +351,14 @@ $initial_cooldown = ($time_since_last < INPUT_COOLDOWN_SECONDS) ? (INPUT_COOLDOW
             font-size: 0.95rem;
             font-weight: 600;
             color: #212529;
+        }
+
+        .item-box {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 12px;
+            padding: 12px;
+            margin-bottom: 12px;
         }
     </style>
 </head>
@@ -441,14 +516,12 @@ $initial_cooldown = ($time_since_last < INPUT_COOLDOWN_SECONDS) ? (INPUT_COOLDOW
             <div class="card card-custom p-3 border-start border-4 border-info">
                 <ul class="info-list">
                     <li>
-                        <span class="label">Nama Supplier</span>
-                        <span class="value text-uppercase"><?= htmlspecialchars($_SESSION['supplier_nama'] ?? '-') ?></span>
-                    </li>
-                    <li>
-                        <span class="label">Jenis Barang & Kategori</span>
-                        <span class="value d-flex align-items-center gap-2 flex-wrap mt-1">
-                            <span class="badge bg-primary rounded-pill px-3 py-1"><?= htmlspecialchars($_SESSION['supplier_jenis_barang'] ?? '-') ?></span>
-                            <span class="badge bg-info text-dark rounded-pill px-3 py-1"><?= htmlspecialchars($_SESSION['supplier_kategori'] ?? '-') ?></span>
+                        <span class="label">Nama Supplier & Kategori</span>
+                        <span class="value d-flex align-items-center justify-content-between flex-wrap gap-1">
+                            <span class="text-uppercase"><?= htmlspecialchars($_SESSION['supplier_nama'] ?? '-') ?></span>
+                            <span class="badge bg-info text-dark rounded-pill px-3 py-1" style="font-size:0.75rem;">
+                                <?= htmlspecialchars($_SESSION['supplier_kategori'] ?? '-') ?>
+                            </span>
                         </span>
                     </li>
                     <li>
@@ -461,41 +534,99 @@ $initial_cooldown = ($time_since_last < INPUT_COOLDOWN_SECONDS) ? (INPUT_COOLDOW
                 </ul>
             </div>
 
-            <!-- Form Bawaan (Input Angka Opsional & Pilih Satuan) -->
-            <div class="card card-custom p-3 mt-3">
+            <!-- Card 1: Tambah Jenis Barang Baru (Tersimpan Otomatis untuk Login Berikutnya) -->
+            <div class="card card-custom p-3 border-start border-4 border-primary">
+                <h6 class="fw-bold mb-1 text-dark" style="font-size: 0.9rem;">
+                    <i class="fa-solid fa-plus-circle text-primary me-1"></i> Daftarkan Jenis Barang Baru
+                </h6>
+                <p class="text-muted mb-2" style="font-size: 0.75rem;">
+                    Barang yang ditambahkan akan tersimpan otomatis untuk kedatangan berikutnya.
+                </p>
+                <form method="POST" action="" class="d-flex gap-2">
+                    <input type="hidden" name="action" value="tambah_barang">
+                    <input type="text" name="nama_barang_baru" class="form-control" placeholder="Contoh: Keripik Tempe / Kaos..." required>
+                    <button type="submit" class="btn btn-primary fw-semibold px-3">
+                        <i class="fa-solid fa-plus"></i> Tambah
+                    </button>
+                </form>
+            </div>
+
+            <!-- Card 2: Form Input Jumlah (Pcs / Box) dari Barang yang Sudah Tersimpan -->
+            <div class="card card-custom p-3">
                 <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h6 class="fw-bold mb-0 text-dark"><i class="fa-solid fa-box-open text-primary me-2"></i>Jumlah Barang Bawaan</h6>
+                    <h6 class="fw-bold mb-0 text-dark"><i class="fa-solid fa-box-open text-success me-2"></i>Input Jumlah Bawaan</h6>
                     <small id="cooldown-badge" class="badge bg-warning text-dark d-none">Jeda</small>
                 </div>
+
+                <?php if (empty($list_barang_supplier)): ?>
+                    <div class="alert alert-warning text-center py-3 mb-3" style="font-size: 0.85rem;">
+                        <i class="fa-solid fa-circle-info mb-1 fs-5 d-block"></i>
+                        Anda belum mendaftarkan jenis barang.<br>
+                        Silakan tambahkan jenis barang di kolom atas terlebih dahulu, atau langsung klik tombol di bawah jika melapor tanpa barang.
+                    </div>
+                <?php endif; ?>
 
                 <form id="formInputBarang" method="POST" action="">
                     <input type="hidden" name="action" value="simpan_akses">
 
-                    <div class="mb-3">
-                        <label class="form-label text-muted fw-semibold" style="font-size:0.8rem;">
-                            Jumlah <?= htmlspecialchars($_SESSION['supplier_jenis_barang'] ?? '-') ?> <span class="fw-normal">(Opsional / Boleh dikosongkan)</span>
-                        </label>
-                        <div class="input-group input-group-lg">
-                            <input type="number" name="jumlah" class="form-control fw-bold" placeholder="0" min="0" inputmode="numeric" autofocus>
-                            <select name="satuan_id" class="form-select bg-light fw-semibold" style="max-width: 120px;">
-                                <?php foreach ($list_satuan as $sat): ?>
-                                    <option value="<?= $sat['satuan_id'] ?>" <?= (strtolower($sat['nama_satuan']) === 'pcs') ? 'selected' : '' ?>>
-                                        <?= htmlspecialchars($sat['nama_satuan']) ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
+                    <?php foreach ($list_barang_supplier as $index => $brg): ?>
+                        <div class="item-box">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="fw-bold text-dark" style="font-size: 0.95rem;">
+                                    <?= ($index + 1) . '. ' . htmlspecialchars($brg['nama_barang']) ?>
+                                </span>
+                                <!-- Tombol Hapus Barang jika salah input jenis barang -->
+                                <button type="button" class="btn btn-sm text-danger p-0 border-0"
+                                    onclick="hapusBarang(<?= $brg['barang_id'] ?>, '<?= htmlspecialchars(addslashes($brg['nama_barang'])) ?>')"
+                                    title="Hapus barang ini dari daftar">
+                                    <i class="fa-solid fa-trash-can"></i>
+                                </button>
+                            </div>
+
+                            <div class="input-group">
+                                <input type="number"
+                                    name="items[<?= $brg['barang_id'] ?>][jumlah]"
+                                    class="form-control fw-bold"
+                                    placeholder="0 (Kosongkan jika tidak bawa)"
+                                    min="0"
+                                    inputmode="numeric">
+                                <select name="items[<?= $brg['barang_id'] ?>][satuan_id]"
+                                    class="form-select bg-white fw-semibold"
+                                    style="max-width: 110px;">
+                                    <?php foreach ($list_satuan as $sat): ?>
+                                        <option value="<?= $sat['satuan_id'] ?>" <?= (strtolower($sat['nama_satuan']) === 'pcs') ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($sat['nama_satuan']) ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
                         </div>
-                    </div>
+                    <?php endforeach; ?>
 
                     <button type="submit" id="btnSubmitForm" class="btn btn-success btn-mobile-lg w-100 shadow-sm mt-2" disabled>
                         <i class="fa-solid fa-paper-plane me-1"></i> Lapor Masuk Kios
                     </button>
-                    <p class="text-center text-muted mt-3 mb-0" style="font-size:0.75rem;">Sistem akan mencatat waktu & memproses Logout otomatis setelah tombol diklik.</p>
+                    <p class="text-center text-muted mt-3 mb-0" style="font-size:0.75rem;">
+                        Sistem akan mencatat waktu & memproses Logout otomatis setelah tombol diklik.
+                    </p>
+                </form>
+
+                <!-- Form Tersembunyi untuk Hapus Barang -->
+                <form id="formHapusBarang" method="POST" action="" class="d-none">
+                    <input type="hidden" name="action" value="hapus_barang">
+                    <input type="hidden" name="barang_id" id="hapus_barang_id">
                 </form>
             </div>
 
-            <!-- JS Timer -->
+            <!-- JS Timer & Konfirmasi Hapus -->
             <script>
+                function hapusBarang(id, nama) {
+                    if (confirm(`Hapus "${nama}" dari daftar barang tetap Anda?`)) {
+                        document.getElementById('hapus_barang_id').value = id;
+                        document.getElementById('formHapusBarang').submit();
+                    }
+                }
+
                 let cooldownTimer = <?= $initial_cooldown ?>;
 
                 function updateSubmitButtonState() {
