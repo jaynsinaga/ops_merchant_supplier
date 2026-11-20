@@ -9,7 +9,7 @@ require_once '../../config/database.php';
 // Konfigurasi Target POS & Geofencing Radius 100 Meter
 define('POS_LAT', -7.753053);
 define('POS_LNG', 110.495028);
-define('MAX_DISTANCE_METERS', 1000);
+define('MAX_DISTANCE_METERS', 100);
 define('INPUT_COOLDOWN_SECONDS', 60);
 
 function getDistanceHaversine($lat1, $lon1, $lat2, $lon2)
